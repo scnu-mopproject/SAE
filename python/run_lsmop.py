@@ -20,12 +20,14 @@ from saemo import experiment as exp
 
 os.makedirs("figures", exist_ok=True)
 
-M = 2
+M = int(os.environ.get("M", "2"))
 DIM = int(os.environ.get("DIM", "1000"))
 N_RUNS = int(os.environ.get("N_RUNS", "10"))
-POP = 100
-MAX_FE = 20000
+# Paper settings (Table II): N=150 & FE=3e5 for M=2; N=200 & FE=5e5 for M=3.
+POP = int(os.environ.get("POP", "150" if M == 2 else "200"))
+MAX_FE = int(os.environ.get("MAXFE", "300000" if M == 2 else "500000"))
 N_JOBS = int(os.environ.get("N_JOBS", "-1"))
+print(f"[config] M={M} D={DIM} N={POP} maxFE={MAX_FE} runs={N_RUNS} jobs={N_JOBS}")
 
 ALGOS = {
     "NSGA-II": alg.nsga2,
