@@ -167,11 +167,36 @@ def _init_mask(problem, N, score, rng):
     return Mask
 
 
+# --------------------------------------------------------------------------- #
+# APF refinement hook: lets SAE/APF wrap any sparse base (base as SAE's "embedded
+# optimizer"). Injects DST offspring each generation; because the base produces
+# sparse decision vectors, the mod/abs amplitude preserves the zeros.
+# --------------------------------------------------------------------------- #
+def _apf_setup(problem, N, Rate=0.6, Sc=2):
+    RefV, _ = core.uniform_points(N, problem.n_obj)
+    Step = np.zeros(Sc + 2)
+    for r in range(1, Sc + 1):
+        Step[r] = (r - r ** 2 / Sc ** 2) * Rate
+    Step[Sc + 1] = 1.0
+    return RefV, Step
+
+
+def _apf_inject(problem, X, F, RefV, Step, rng, amplitude,
+                Rate=0.6, Sc=2, Ns=5, Up=0.8, fe=0, max_fe=1):
+    from .algorithms import _dst_operator
+    if rng.random() < min(Up, (fe / max_fe / 3 - 1) ** 2):
+        perX = _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns,
+                             fe, max_fe, rng, amplitude=amplitude)
+        if len(perX):
+            return perX, (np.abs(perX) > 1e-12).astype(float)
+    return None, None
+
+
 # =========================================================================== #
 # MSKEA
 # =========================================================================== #
 def mskea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
-          record_every=1):
+          record_every=1, apf=None):
     rng = np.random.default_rng(seed)
     D = problem.n_var
     pv, TDec, TMask, TObj, fe = _var_scores(problem, rng, lambda a: a.sum(0))
@@ -181,6 +206,7 @@ def mskea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
     Objs = np.vstack([O0, TObj]); Dec = np.vstack([Dec0, TDec]); Mask = np.vstack([Mask0, TMask])
     Objs, Dec, Mask, FrontNo, CrowdDis = _spea2_ndsort_select(Objs, Dec, Mask, N, rng)
     sv = np.zeros(D); fv = np.zeros(D); last_num = 0
+    RefV, Step = _apf_setup(problem, N) if apf else (None, None)
 
     hist, record = _tracker(problem, hv_ref, ref_pf, record_every)
     record(fe, Objs)
@@ -206,13 +232,19 @@ def mskea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
                 oDec, oMask = _mskea_pvfv(problem, Dec[pool], Mask[pool], pv, fv, delta, rng)
         else:
             oDec, oMask = _mskea_sv(problem, Dec[pool], Mask[pool], sv, rng)
+        if apf:
+            pD, pM = _apf_inject(problem, Dec * Mask, Objs, RefV, Step, rng, apf,
+                                 fe=fe, max_fe=max_fe)
+            if pD is not None:
+                oDec = np.vstack([oDec, pD]); oMask = np.vstack([oMask, pM])
         oObj = problem.evaluate(oDec * oMask); fe += len(oDec)
         Objs = np.vstack([Objs, oObj]); Dec = np.vstack([Dec, oDec]); Mask = np.vstack([Mask, oMask])
         Objs, Dec, Mask, FrontNo, CrowdDis = _spea2_ndsort_select(Objs, Dec, Mask, N, rng)
         record(fe, Objs)
     record(fe, Objs, force=True)
     nd = nondominated(Objs)
-    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name="MSKEA")
+    name = "MSKEA" if not apf else "APF-MSKEA"
+    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name=name)
 
 
 def _ts1(score, rng):
@@ -329,13 +361,14 @@ def _mgcea_update_layer(sparse_rate, stage, fitness, D, mask, rng):
 
 
 def mgcea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
-          record_every=1):
+          record_every=1, apf=None):
     rng = np.random.default_rng(seed)
     D = problem.n_var
     fitness, sparse_rate, TDec, TMask, TObj, fe = _mgcea_fitnesscal(problem, rng)
     Objs, Dec, Mask, FitS = _spea2_fitness_select(TObj, TDec, TMask, N, rng)
     near = int(np.ceil(fe / (max_fe / 10)))
     layer, layer_max = _mgcea_update_layer(sparse_rate, near, fitness, D, None, rng)
+    RefV, Step = _apf_setup(problem, N) if apf else (None, None)
 
     hist, record = _tracker(problem, hv_ref, ref_pf, record_every)
     record(fe, Objs)
@@ -346,13 +379,19 @@ def mgcea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
             near = stage
             layer, layer_max = _mgcea_update_layer(sparse_rate, stage, fitness, D, Mask, rng)
         oDec, oMask = _mgcea_operator(problem, Dec[pool], Mask[pool], layer, layer_max, rng)
+        if apf:
+            pD, pM = _apf_inject(problem, Dec * Mask, Objs, RefV, Step, rng, apf,
+                                 fe=fe, max_fe=max_fe)
+            if pD is not None:
+                oDec = np.vstack([oDec, pD]); oMask = np.vstack([oMask, pM])
         oObj = problem.evaluate(oDec * oMask); fe += len(oDec)
         Objs = np.vstack([Objs, oObj]); Dec = np.vstack([Dec, oDec]); Mask = np.vstack([Mask, oMask])
         Objs, Dec, Mask, FitS = _spea2_fitness_select(Objs, Dec, Mask, N, rng)
         record(fe, Objs)
     record(fe, Objs, force=True)
     nd = nondominated(Objs)
-    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name="MGCEA")
+    name = "MGCEA" if not apf else "APF-MGCEA"
+    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name=name)
 
 
 def _mgcea_operator(problem, PDec, PMask, layer, layer_max, rng):
@@ -396,7 +435,7 @@ def _mgcea_operator(problem, PDec, PMask, layer, layer_max, rng):
 # BLIGEA
 # =========================================================================== #
 def bligea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
-           record_every=1):
+           record_every=1, apf=None):
     rng = np.random.default_rng(seed)
     D = problem.n_var
     fitness, TDec, TMask, TObj, fe = _var_scores(
@@ -408,6 +447,7 @@ def bligea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
     Objs = np.vstack([O0, TObj]); Dec = np.vstack([Dec0, TDec]); Mask = np.vstack([Mask0, TMask])
     Objs, Dec, Mask, FrontNo, CrowdDis = _spea2_ndsort_select(Objs, Dec, Mask, N, rng)
     sv = np.zeros(D); last_num = 0
+    RefV, Step = _apf_setup(problem, N) if apf else (None, None)
 
     hist, record = _tracker(problem, hv_ref, ref_pf, record_every)
     record(fe, Objs)
@@ -423,13 +463,19 @@ def bligea(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
         fitness = np.minimum(fitness.max(), fitness + np.sqrt(t) * it * (1 - sv))
         pool = tournament(2, 2 * N, FrontNo, -CrowdDis, rng=rng)
         oDec, oMask = _bligea_operator(problem, Dec[pool], Mask[pool], fitness, it, sv, fv, rng)
+        if apf:
+            pD, pM = _apf_inject(problem, Dec * Mask, Objs, RefV, Step, rng, apf,
+                                 fe=fe, max_fe=max_fe)
+            if pD is not None:
+                oDec = np.vstack([oDec, pD]); oMask = np.vstack([oMask, pM])
         oObj = problem.evaluate(oDec * oMask); fe += len(oDec)
         Objs = np.vstack([Objs, oObj]); Dec = np.vstack([Dec, oDec]); Mask = np.vstack([Mask, oMask])
         Objs, Dec, Mask, FrontNo, CrowdDis = _spea2_ndsort_select(Objs, Dec, Mask, N, rng)
         record(fe, Objs)
     record(fe, Objs, force=True)
     nd = nondominated(Objs)
-    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name="BLIGEA")
+    name = "BLIGEA" if not apf else "APF-BLIGEA"
+    return Result(X=(Dec * Mask)[nd], F=Objs[nd], history=hist, name=name)
 
 
 def _mask_group(it, mask, n_groups, fv):
