@@ -198,7 +198,38 @@ class SMOP5(_SMOP):
         return gg.sum(1) + np.abs(K - np.sum(dist != 0, axis=1))
 
 
+# =========================================================================== #
+# Sparse_PO -- portfolio optimization (Tian et al., IEEE TCyb 2021).
+#   Faithful port of PlatEMO Sparse_PO.m + Dataset_PO.mat.
+#   f1 = w' Risk w  (risk),  f2 = 1 - sum(w . Yield)  (1 - return),
+#   with weights normalized so that sum|w| <= 1. Real-world -> HV only.
+# =========================================================================== #
+class SparsePO(Problem):
+    def __init__(self, dataNo=1, data_path=None):
+        import os
+        import scipy.io as sio
+        if data_path is None:
+            data_path = os.path.join(os.path.dirname(__file__), "data", "Dataset_PO.mat")
+        ds = sio.loadmat(data_path)["Dataset"][0, 0]
+        Data = ds[{1: "data1000", 2: "data5000"}[dataNo]].astype(float)
+        self.Yield = np.log(Data[:, 1:]) - np.log(Data[:, :-1])     # D x (T-1)
+        self.Risk = np.cov(self.Yield)                              # D x D
+        D = self.Yield.shape[0]
+        super().__init__(D, 2, xl=-1.0, xu=1.0)
+
+    def _evaluate(self, X):
+        s = np.maximum(np.abs(X).sum(1, keepdims=True), 1.0)
+        W = X / s
+        f1 = np.einsum("ij,jk,ik->i", W, self.Risk, W)             # w' Risk w
+        f2 = 1.0 - (W @ self.Yield).sum(1)                          # 1 - return
+        return np.column_stack([f1, f2])
+
+    def pareto_front(self, n=300):
+        return None            # real-world problem: no analytic PF (use HV)
+
+
 PROBLEMS = {
     "SparseZDT1": SparseZDT1, "SparseZDT2": SparseZDT2,
     "SMOP1": SMOP1, "SMOP2": SMOP2, "SMOP3": SMOP3, "SMOP4": SMOP4, "SMOP5": SMOP5,
+    "SparsePO": SparsePO,
 }
