@@ -6,6 +6,7 @@ Run:  python run_smop.py
 Writes figures to ./figures/ and a results table to ./figures/results.txt
 """
 import os
+from functools import partial
 import numpy as np
 
 from saemo import problems as prob
@@ -19,13 +20,16 @@ HV_REF = np.array([1.1, 1.1])
 N_RUNS = 10
 POP = 100
 MAX_FE = 20000
+N_JOBS = int(os.environ.get("N_JOBS", "-1"))   # -1 = all cores; set N_JOBS=1 for serial
 
+# NOTE: values are module-level funcs or functools.partial so they pickle for
+# multiprocessing. Do NOT use lambdas here (they are not picklable).
 ALGOS = {
     "SparseEA": alg.sparseea,
     "MSKEA": bl.mskea,
     "MGCEA": bl.mgcea,
     "BLIGEA": bl.bligea,
-    "APF-SparseEA": lambda p, **k: alg.apf_sparseea(p, amplitude="mod", **k),
+    "APF-SparseEA": partial(alg.apf_sparseea, amplitude="mod"),
 }
 
 SMOPS = {"SMOP1": prob.SMOP1, "SMOP2": prob.SMOP2, "SMOP3": prob.SMOP3,
@@ -39,8 +43,8 @@ def main():
     per_problem = {}
     for pname, pcls in SMOPS.items():
         print(f"\n=== {pname} (D=100) ===")
-        res = exp.run_comparison(lambda D: pcls(n_var=D), ALGOS, [100],
-                                 N=POP, max_fe=MAX_FE, n_runs=N_RUNS, hv_ref=HV_REF)
+        res = exp.run_comparison(pcls, ALGOS, [100], N=POP, max_fe=MAX_FE,
+                                 n_runs=N_RUNS, hv_ref=HV_REF, n_jobs=N_JOBS)
         per_problem[pname] = res[100]
         lines.append(f"\n== {pname} (D=100) : IGD mean(std), Wilcoxon vs APF-SparseEA ==")
         for row in exp.significance_table(res, metric="igd", reference="APF-SparseEA"):
@@ -52,9 +56,9 @@ def main():
 
     # ---- (B) SMOP1 scalability across dimensions ----
     print("\n=== SMOP1 scalability ===")
-    scal = exp.run_comparison(lambda D: prob.SMOP1(n_var=D), ALGOS,
-                              [100, 500, 1000], N=POP, max_fe=MAX_FE,
-                              n_runs=max(4, N_RUNS // 2), hv_ref=HV_REF)
+    scal = exp.run_comparison(prob.SMOP1, ALGOS, [100, 500, 1000],
+                              N=POP, max_fe=MAX_FE, n_runs=max(4, N_RUNS // 2),
+                              hv_ref=HV_REF, n_jobs=N_JOBS)
     exp.plot_pareto(scal, 500, "figures/smop1_pareto_D500.png",
                     title="SMOP1 Pareto front (D=500)")
     exp.plot_convergence(scal, 500, "figures/smop1_igd_conv_D500.png", metric="igd",

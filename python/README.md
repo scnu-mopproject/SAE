@@ -8,8 +8,28 @@ you need to compare results — no MATLAB / PlatEMO required.
 ## Install & run
 ```bash
 pip install -r requirements.txt
-python demo.py            # runs a comparison and writes ./figures/*.png
+python run_smop.py        # SMOP1-5 vs baselines; writes ./figures/*.png
+python demo.py            # smaller sanity comparison
 ```
+
+## Performance (running on your own machine)
+The experiment is embarrassingly parallel across (problem × algorithm × seed),
+so it scales near-linearly with CPU cores. Control it with `n_jobs`:
+```bash
+N_JOBS=-1 python run_smop.py     # use all cores (default in run_smop.py)
+N_JOBS=1  python run_smop.py     # serial (debugging)
+```
+or in code: `experiment.run_comparison(..., n_jobs=-1)`.
+
+Notes on hardware:
+- **More cores** is the biggest win (parallel runs). A faster single-core clock
+  helps the per-individual mask loops and O(n^2) sorting somewhat.
+- **GPU is not supported and would not help**: tiny populations (N=100-200),
+  branchy mask/sort/tournament logic, and low arithmetic intensity make this a
+  poor GPU fit — kernel-launch/transfer overhead would dominate. Use CPU cores.
+- Baselines with the 5xD single-variable scoring initialization (MSKEA, MGCEA,
+  BLIGEA) spend `~5*D` evaluations before evolving; at very large D reduce this
+  or raise `max_fe` to match the paper's settings.
 
 ## What is implemented (faithful)
 | Component | Source | Status |
