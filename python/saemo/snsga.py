@@ -139,7 +139,8 @@ def vssps(problem, N, sLower, sUpper, rng):
 # Algorithm
 # --------------------------------------------------------------------------- #
 def snsgaii(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
-            record_every=1, apf=None, sLower=0.75, sUpper=1.0):
+            record_every=1, apf=None, sLower=0.75, sUpper=1.0,
+            abl=None, trigger=True, name=None):
     rng = np.random.default_rng(seed)
     X = vssps(problem, N, sLower, sUpper, rng)
     F = problem.evaluate(X); fe = N
@@ -155,7 +156,7 @@ def snsgaii(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
         off = spm(off, problem.xl, problem.xu, rng)
         if apf:
             pD, _ = _apf_inject(problem, X, F, RefV, Step, rng, apf,
-                                fe=fe, max_fe=max_fe)
+                                fe=fe, max_fe=max_fe, abl=abl, trigger=trigger)
             if pD is not None:
                 off = np.vstack([off, pD])
         offF = problem.evaluate(off); fe += len(off)
@@ -167,8 +168,8 @@ def snsgaii(problem, N=100, max_fe=20000, seed=0, hv_ref=None, ref_pf=None,
         record(fe, F)
     record(fe, F, force=True)
     nd = nondominated(F)
-    name = "SNSGA-II" if not apf else "APF-SNSGA-II"
-    return Result(X=X[nd], F=F[nd], history=hist, name=name)
+    tag = name or ("SNSGA-II" if not apf else "APF-SNSGA-II")
+    return Result(X=X[nd], F=F[nd], history=hist, name=tag)
 
 
 SNSGA = {"SNSGA-II": snsgaii}

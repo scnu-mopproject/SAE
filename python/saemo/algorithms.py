@@ -212,10 +212,30 @@ def _representative_selection(Obj, RefV, theta):
     return best
 
 
+# Ablation configuration. None -> the full method. Keys:
+#   directional (D): bi-directional bound-anchored sampling on/off
+#   shrink      (R): geometric coarse-to-fine radius on/off (off = fixed radius)
+#   iapd        (I): IAPD representative selection on/off (off = random reps)
+#   direction   : 'bound' (L->X,U->X) or 'random' (C2 control)
+#   control     : None | 'equal_random' | 'equal_perturb'  (C1 equal-offspring)
+ABL_FULL = dict(directional=True, shrink=True, iapd=True,
+                direction="bound", control=None)
+
+
+def _abl(abl):
+    cfg = dict(ABL_FULL)
+    if abl:
+        cfg.update(abl)
+    return cfg
+
+
 def _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns, fe, max_fe, rng,
-                  amplitude="mod"):
-    """Port of DSTOperator.m. amplitude='mod' matches the MATLAB code;
-    amplitude='abs' is the continuous, zero-preserving alternative."""
+                  amplitude="mod", abl=None):
+    """Port of DSTOperator.m with ablation switches (see ABL_FULL).
+    amplitude='mod' matches the MATLAB code; 'abs' is continuous zero-preserving;
+    'fixed' is the additive LSMOP-paper radius (also the C5 no-zero-preservation
+    control on sparse problems)."""
+    cfg = _abl(abl)
     L, U = problem.xl, problem.xu
     D = problem.n_var
     N = len(X)
@@ -227,7 +247,10 @@ def _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns, fe, max_fe, rng,
     else:
         centroids = RefV
     t = fe / max_fe
-    best = _representative_selection(F, centroids, 0.1 ** t)
+    if cfg["iapd"]:
+        best = _representative_selection(F, centroids, 0.1 ** t)          # I on
+    else:
+        best = rng.integers(0, N, min(Nw, N))                            # C3: random reps
     BestX = X[best]
     Nw = len(BestX)
 
@@ -236,20 +259,27 @@ def _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns, fe, max_fe, rng,
             return np.mod(v, 1.0)          # sparse: preserves zeros
         if amplitude == "abs":
             return np.abs(v)               # sparse, continuous
-        return np.ones_like(v)             # 'fixed': additive radius (LSMOP paper, Eq.12)
+        return np.ones_like(v)             # 'fixed'/no-frac: additive radius
+
+    def rand_dir(n):
+        d = rng.standard_normal((n, D))
+        return d / (np.linalg.norm(d, axis=1, keepdims=True) + 1e-12)
 
     perX1, perX2 = [], []
     for i in range(1, Sc + 2):                           # substages 1..Sc+1
         if Step[i - 1] < t <= Step[i]:
-            amp = 3.0 * 0.5 ** (i - 1)
+            expo = (i - 1) if cfg["shrink"] else 0       # R off -> fixed radius
+            amp = 3.0 * 0.5 ** expo
             r = amp * frac(BestX)
             perX1.append(rng.uniform(BestX - r, BestX + r))
-            if t < Rate:                                 # coarse phase: directional
-                dL = BestX - L
-                dU = BestX - U
-                nL = np.linalg.norm(dL, axis=1, keepdims=True) + 1e-12
-                nU = np.linalg.norm(dU, axis=1, keepdims=True) + 1e-12
-                dirL, dirU = dL / nL, dU / nU
+            if cfg["directional"] and t < Rate:          # D on, coarse phase
+                if cfg["direction"] == "random":         # C2: random directions
+                    dirL, dirU = rand_dir(Nw), rand_dir(Nw)
+                else:
+                    dL, dU = BestX - L, BestX - U
+                    nL = np.linalg.norm(dL, axis=1, keepdims=True) + 1e-12
+                    nU = np.linalg.norm(dU, axis=1, keepdims=True) + 1e-12
+                    dirL, dirU = dL / nL, dU / nU
                 interval = np.linalg.norm(U - L)
                 for _ in range(Ns):
                     aL = rng.uniform(0, interval, (Nw, 1))
@@ -263,12 +293,23 @@ def _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns, fe, max_fe, rng,
     if not parts:
         return np.zeros((0, D))
     PerX = np.vstack(parts)
-    return np.clip(PerX, L, U)
+    PerX = np.clip(PerX, L, U)
+
+    # C1 equal-offspring control: keep the SAME count but replace the structured
+    # offspring with naive ones (isolates mechanism vs "more/extra offspring").
+    if cfg["control"] == "equal_random":
+        PerX = rng.uniform(L, U, (len(PerX), D))
+    elif cfg["control"] == "equal_perturb":
+        idx = rng.integers(0, Nw, len(PerX))
+        PerX = np.clip(BestX[idx] + rng.uniform(-3.0, 3.0, (len(PerX), D)), L, U)
+    return PerX
 
 
 def apf_nsga2(problem, N=100, max_fe=20000, seed=0, Rate=0.6, Sc=2, Ns=5,
-              Up=0.8, amplitude="mod", hv_ref=None, ref_pf=None, record_every=1):
-    """Proposed framework with NSGA-II embedded."""
+              Up=0.8, amplitude="mod", hv_ref=None, ref_pf=None, record_every=1,
+              abl=None, trigger=True, name=None):
+    """Proposed framework with NSGA-II embedded. ``abl`` = ablation config
+    (see ABL_FULL); ``trigger`` False = constant injection probability (T off)."""
     rng = np.random.default_rng(seed)
     RefV, _ = core.uniform_points(N, problem.n_obj)
     Step = np.zeros(Sc + 2)
@@ -287,9 +328,10 @@ def apf_nsga2(problem, N=100, max_fe=20000, seed=0, Rate=0.6, Sc=2, Ns=5,
     while fe < max_fe:
         pool = core.tournament_selection(2, N, front, -cd, rng=rng)
         off = core.operator_ga(X[pool], problem.xl, problem.xu, rng=rng)
-        if rng.random() < min(Up, (fe / max_fe / 3 - 1) ** 2):
+        prob = Up if not trigger else min(Up, (fe / max_fe / 3 - 1) ** 2)
+        if rng.random() < prob:
             perX = _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns,
-                                 fe, max_fe, rng, amplitude=amplitude)
+                                 fe, max_fe, rng, amplitude=amplitude, abl=abl)
             if len(perX):
                 off = np.vstack([off, perX])
         offF = problem.evaluate(off)
@@ -304,7 +346,7 @@ def apf_nsga2(problem, N=100, max_fe=20000, seed=0, Rate=0.6, Sc=2, Ns=5,
 
     record(fe, F, force=True)
     nd = nondominated(F)
-    tag = "APF-NSGA-II" + ("" if amplitude == "mod" else f"({amplitude})")
+    tag = name or ("APF-NSGA-II" + ("" if amplitude == "mod" else f"({amplitude})"))
     return Result(X=X[nd], F=F[nd], history=hist, name=tag)
 
 

@@ -182,11 +182,13 @@ def _apf_setup(problem, N, Rate=0.6, Sc=2):
 
 
 def _apf_inject(problem, X, F, RefV, Step, rng, amplitude,
-                Rate=0.6, Sc=2, Ns=5, Up=0.8, fe=0, max_fe=1):
+                Rate=0.6, Sc=2, Ns=5, Up=0.8, fe=0, max_fe=1,
+                abl=None, trigger=True):
     from .algorithms import _dst_operator
-    if rng.random() < min(Up, (fe / max_fe / 3 - 1) ** 2):
+    prob = Up if not trigger else min(Up, (fe / max_fe / 3 - 1) ** 2)
+    if rng.random() < prob:
         perX = _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns,
-                             fe, max_fe, rng, amplitude=amplitude)
+                             fe, max_fe, rng, amplitude=amplitude, abl=abl)
         if len(perX):
             return perX, (np.abs(perX) > 1e-12).astype(float)
     return None, None
