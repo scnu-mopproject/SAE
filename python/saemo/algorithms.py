@@ -304,4 +304,71 @@ def apf_nsga2(problem, N=100, max_fe=20000, seed=0, Rate=0.6, Sc=2, Ns=5,
     return Result(X=X[nd], F=F[nd], history=hist, name=tag)
 
 
-ALGORITHMS = {"NSGA-II": nsga2, "SparseEA": sparseea, "APF-NSGA-II": apf_nsga2}
+def apf_sparseea(problem, N=100, max_fe=20000, seed=0, Rate=0.6, Sc=2, Ns=5,
+                 Up=0.8, amplitude="mod", hv_ref=None, ref_pf=None, record_every=1):
+    """APF refinement embedded in a *sparse* base (SparseEA), i.e. the correct
+    analogue of the paper's ``APFSNSGAII`` (APF over a sparsity-producing base).
+
+    Each generation, with the same probability gate, the DST operator produces
+    extra offspring from the current (already sparse) decision vectors; because
+    those vectors contain exact zeros, the mod/abs amplitude term preserves the
+    sparse pattern. DST offspring are folded back as (mask = x!=0, dec = x)."""
+    rng = np.random.default_rng(seed)
+    D = problem.n_var
+    RefV, _ = core.uniform_points(N, problem.n_obj)
+    Step = np.zeros(Sc + 2)
+    for r in range(1, Sc + 1):
+        Step[r] = (r - r ** 2 / Sc ** 2) * Rate
+    Step[Sc + 1] = 1.0
+
+    fitness, _ = _sparse_fitness(problem, rng)
+    fe = D
+    Dec = problem.xl + rng.random((N, D)) * (problem.xu - problem.xl)
+    Mask = np.zeros((N, D))
+    for i in range(N):
+        k = int(np.ceil(rng.random() * D))
+        chosen = set()
+        for _ in range(k):
+            a, b = rng.integers(0, D, 2)
+            chosen.add(a if fitness[a] <= fitness[b] else b)
+        Mask[i, list(chosen)] = 1
+    F = problem.evaluate(Dec * Mask)
+    fe += N
+    hist, record = _tracker(problem, hv_ref, ref_pf, record_every)
+    record(fe, F)
+
+    while fe < max_fe:
+        X = Dec * Mask
+        front = core.fast_nondominated_sort(F)
+        cd = core.crowding_distance(F, front)
+        pool = core.tournament_selection(2, N, front, -cd, rng=rng)
+        oDec = np.zeros((N, D)); oMask = np.zeros((N, D))
+        for i in range(N):
+            p, q = pool[i], pool[rng.integers(0, N)]
+            oDec[i], oMask[i] = _sparse_offspring(
+                Dec[p], Mask[p], Dec[q], Mask[q], fitness, problem, rng)
+        # ---- APF/DST extra offspring on the sparse decision vectors ----
+        if rng.random() < min(Up, (fe / max_fe / 3 - 1) ** 2):
+            perX = _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns,
+                                 fe, max_fe, rng, amplitude=amplitude)
+            if len(perX):
+                oDec = np.vstack([oDec, perX])
+                oMask = np.vstack([oMask, (np.abs(perX) > 1e-12).astype(float)])
+        off = oDec * oMask
+        offF = problem.evaluate(off)
+        fe += len(off)
+        Dec = np.vstack([Dec, oDec]); Mask = np.vstack([Mask, oMask])
+        F = np.vstack([F, offF])
+        keep = core.nsga2_environmental_selection(F, N)
+        Dec, Mask, F = Dec[keep], Mask[keep], F[keep]
+        record(fe, F)
+
+    record(fe, F, force=True)
+    Xf = Dec * Mask
+    nd = nondominated(F)
+    tag = "APF-SparseEA" + ("" if amplitude == "mod" else f"({amplitude})")
+    return Result(X=Xf[nd], F=F[nd], history=hist, name=tag)
+
+
+ALGORITHMS = {"NSGA-II": nsga2, "SparseEA": sparseea, "APF-NSGA-II": apf_nsga2,
+              "APF-SparseEA": apf_sparseea}

@@ -85,4 +85,120 @@ class SparseZDT2(_SparseZDT):
         return np.column_stack([f1, 1 - f1 ** 2])
 
 
-PROBLEMS = {"SparseZDT1": SparseZDT1, "SparseZDT2": SparseZDT2}
+# =========================================================================== #
+# SMOP1-8 (Tian et al., IEEE TEVC 2020) -- faithful port of PlatEMO .m files.
+#   position vars x_1..x_{M-1} in [0,1];  distance vars in [-1,2].
+#   K = ceil(theta*(D-M+1)) "relevant" distance vars (optimum at pi/3),
+#   the remaining distance vars are 0 at the Pareto set  ->  sparse.
+# =========================================================================== #
+def _g1(x, t):
+    return (x - t) ** 2
+
+
+def _g2(x, t):
+    return 2 * (x - t) ** 2 + np.sin(2 * np.pi * (x - t)) ** 2
+
+
+def _g3(x, t):
+    return 4 - (x - t) - 4.0 / np.exp(100 * (x - t) ** 2)
+
+
+class _SMOP(Problem):
+    """Base for the SMOP suite. Subclasses implement ``_g_of(dist)`` and set
+    ``shape`` in {"linear", "concave"}."""
+    shape = "linear"
+
+    def __init__(self, n_var=100, n_obj=2, theta=0.1):
+        M = n_obj
+        xl = np.concatenate([np.zeros(M - 1), -np.ones(n_var - M + 1)])
+        xu = np.concatenate([np.ones(M - 1), 2 * np.ones(n_var - M + 1)])
+        super().__init__(n_var, M, xl, xu)
+        self.theta = theta
+        self.K = int(np.ceil(theta * (n_var - M + 1)))
+
+    # --- objective assembly shared by every SMOP ---
+    def _shape_terms(self, pos):
+        n = pos.shape[0]
+        ones = np.ones((n, 1))
+        if self.shape == "linear":
+            A = np.cumprod(np.hstack([ones, pos]), axis=1)[:, ::-1]
+            B = np.hstack([ones, 1 - pos[:, ::-1]])
+        else:  # concave
+            A = np.cumprod(np.hstack([ones, 1 - np.cos(pos * np.pi / 2)]), axis=1)[:, ::-1]
+            B = np.hstack([ones, 1 - np.sin(pos[:, ::-1] * np.pi / 2)])
+        return A * B
+
+    def _evaluate(self, X):
+        M, D = self.n_obj, self.n_var
+        pos = X[:, :M - 1]
+        dist = X[:, M - 1:]
+        g = self._g_of(dist)
+        pop = (1 + g / (D - M + 1))[:, None] * self._shape_terms(pos)
+        return pop
+
+    def _g_of(self, dist):                       # pragma: no cover
+        raise NotImplementedError
+
+    def pareto_sparsity(self):
+        return (self.n_var - self.n_obj + 1 - self.K) / (self.n_var - self.n_obj + 1)
+
+    def pareto_front(self, n=300):
+        if self.n_obj != 2:
+            raise NotImplementedError("PF reference implemented for M=2")
+        if self.shape == "linear":
+            f1 = np.linspace(0, 1, n)
+            return np.column_stack([f1, 1 - f1])
+        x1 = np.linspace(0, 1, n)
+        return np.column_stack([1 - np.cos(x1 * np.pi / 2), 1 - np.sin(x1 * np.pi / 2)])
+
+
+class SMOP1(_SMOP):
+    shape = "linear"
+    def _g_of(self, dist):
+        K = self.K
+        return _g1(dist[:, :K], np.pi / 3).sum(1) + _g2(dist[:, K:], 0).sum(1)
+
+
+class SMOP2(_SMOP):
+    shape = "linear"
+    def _g_of(self, dist):
+        K = self.K
+        return _g2(dist[:, :K], np.pi / 3).sum(1) + _g3(dist[:, K:], 0).sum(1)
+
+
+class SMOP3(_SMOP):
+    shape = "linear"
+    def _g_of(self, dist):
+        K = self.K
+        g = _g1(dist[:, :K], np.pi / 3).sum(1)
+        rest = dist[:, K:]
+        n_rest = rest.shape[1]
+        for i in range(int(np.ceil(n_rest / 10))):
+            chunk = rest[:, i * 10:(i + 1) * 10]
+            temp = 50 - _g1(chunk, 0).sum(1)
+            m = temp < 50
+            g[m] += temp[m]
+        return g
+
+
+class SMOP4(_SMOP):
+    shape = "concave"
+    def _g_of(self, dist):
+        M, D = self.n_obj, self.n_var
+        K = self.K
+        g = np.sort(_g3(dist, 0), axis=1)
+        return g[:, :D - M - K + 1].sum(1)
+
+
+class SMOP5(_SMOP):
+    shape = "concave"
+    def _g_of(self, dist):
+        K = self.K
+        gg = _g1(dist, np.pi / 3) * _g2(dist, 0)
+        return gg.sum(1) + np.abs(K - np.sum(dist != 0, axis=1))
+
+
+PROBLEMS = {
+    "SparseZDT1": SparseZDT1, "SparseZDT2": SparseZDT2,
+    "SMOP1": SMOP1, "SMOP2": SMOP2, "SMOP3": SMOP3, "SMOP4": SMOP4, "SMOP5": SMOP5,
+}
