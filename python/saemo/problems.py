@@ -228,8 +228,179 @@ class SparsePO(Problem):
         return None            # real-world problem: no analytic PF (use HV)
 
 
+# =========================================================================== #
+# LSMOP1-9 (Cheng et al., IEEE TCyb 2017) -- faithful port of PlatEMO.
+#   D = 100*M by default; position vars x_1..x_{M-1} in [0,1], distance vars
+#   in [0,10]; chaotic variable grouping; shapes: linear (1-4), convex (5-8),
+#   disconnected (9).
+# =========================================================================== #
+def _ls_sphere(x):
+    return (x ** 2).sum(1)
+
+
+def _ls_griewank(x):
+    n = x.shape[1]
+    return (x ** 2).sum(1) / 4000 - np.prod(np.cos(x / np.sqrt(np.arange(1, n + 1))), axis=1) + 1
+
+
+def _ls_schwefel(x):
+    return np.abs(x).max(1) if x.shape[1] else np.zeros(len(x))
+
+
+def _ls_rastrigin(x):
+    return (x ** 2 - 10 * np.cos(2 * np.pi * x) + 10).sum(1)
+
+
+def _ls_rosenbrock(x):
+    if x.shape[1] < 2:
+        return np.zeros(len(x))
+    return (100 * (x[:, :-1] ** 2 - x[:, 1:]) ** 2 + (x[:, :-1] - 1) ** 2).sum(1)
+
+
+def _ls_ackley(x):
+    n = x.shape[1]
+    return (20 - 20 * np.exp(-0.2 * np.sqrt((x ** 2).sum(1) / n))
+            - np.exp(np.cos(2 * np.pi * x).sum(1) / n) + np.e)
+
+
+class _LSMOP(Problem):
+    shape = "linear"                     # 'linear' | 'convex' | 'disconnected'
+    gfun = (_ls_sphere, _ls_sphere)      # (odd-group fn, even-group fn)
+
+    def __init__(self, n_var=None, n_obj=2, nk=5):
+        M = n_obj
+        D = 100 * M if n_var is None else n_var
+        xl = np.zeros(D)
+        xu = np.concatenate([np.ones(M - 1), 10 * np.ones(D - M + 1)])
+        super().__init__(D, M, xl, xu)
+        self.nk = nk
+        c = [3.8 * 0.1 * (1 - 0.1)]
+        for _ in range(M - 1):
+            c.append(3.8 * c[-1] * (1 - c[-1]))
+        c = np.array(c)
+        self.sublen = np.floor(c / c.sum() * (D - M + 1) / nk).astype(int)
+        self.len = np.concatenate([[0], np.cumsum(self.sublen * nk)]).astype(int)
+
+    def _link(self, X):
+        M, D = self.n_obj, self.n_var
+        Xd = X.copy()
+        idx = np.arange(M, D + 1) / D
+        factor = 1 + idx if self.shape == "linear" else 1 + np.cos(idx * np.pi / 2)
+        Xd[:, M - 1:] = factor * Xd[:, M - 1:] - Xd[:, 0:1] * 10
+        return Xd
+
+    def _G(self, Xd):
+        M, N = self.n_obj, len(Xd)
+        G = np.zeros((N, M))
+        A, B = self.gfun
+        for g in range(M):
+            fn = A if g % 2 == 0 else B
+            acc = np.zeros(N)
+            for jj in range(self.nk):
+                s = self.len[g] + (M - 1) + jj * self.sublen[g]
+                acc = acc + fn(Xd[:, s:s + self.sublen[g]])
+            G[:, g] = acc
+        return G
+
+    def _evaluate(self, X):
+        M, N = self.n_obj, len(X)
+        Xd = self._link(X)
+        G = self._G(Xd)
+        pos = X[:, :M - 1]
+        ones = np.ones((N, 1))
+        if self.shape == "disconnected":
+            Gs = 1 + (G / self.sublen[None, :] / self.nk).sum(1)
+            obj = np.zeros((N, M))
+            obj[:, :M - 1] = pos
+            inner = (pos / (1 + Gs[:, None]) * (1 + np.sin(3 * np.pi * pos))).sum(1)
+            obj[:, M - 1] = (1 + Gs) * (M - inner)
+            return obj
+        G = G / self.sublen[None, :] / self.nk
+        if self.shape == "linear":
+            A = np.cumprod(np.hstack([ones, pos]), axis=1)[:, ::-1]
+            Bm = np.hstack([ones, 1 - pos[:, ::-1]])
+            return (1 + G) * A * Bm
+        Gc = 1 + G + np.hstack([G[:, 1:], np.zeros((N, 1))])
+        A = np.cumprod(np.hstack([ones, np.cos(pos * np.pi / 2)]), axis=1)[:, ::-1]
+        Bm = np.hstack([ones, np.sin(pos[:, ::-1] * np.pi / 2)])
+        return Gc * A * Bm
+
+    def pareto_front(self, n=300):
+        M = self.n_obj
+        if self.shape == "linear":
+            if M == 2:
+                f1 = np.linspace(0, 1, n)
+                return np.column_stack([f1, 1 - f1])
+            return core_uniform(n, M)
+        if self.shape == "convex":
+            if M == 2:
+                w = np.linspace(0, 1, n)
+                P = np.column_stack([w, 1 - w])
+                return P / np.linalg.norm(P, axis=1, keepdims=True)
+            R = core_uniform(n, M)
+            return R / np.linalg.norm(R, axis=1, keepdims=True)
+        # disconnected (LSMOP9), M=2
+        interval = [0, 0.251412, 0.631627, 0.859401]
+        med = (interval[1] - interval[0]) / ((interval[3] - interval[2]) + (interval[1] - interval[0]))
+        X = np.linspace(0, 1, n)
+        X = np.where(X <= med, X * (interval[1] - interval[0]) / med + interval[0],
+                     (X - med) * (interval[3] - interval[2]) / (1 - med) + interval[2])
+        f2 = 2 * (2 - X / 2 * (1 + np.sin(3 * np.pi * X)))
+        R = np.column_stack([X, f2])
+        return R[_nd_mask(R)]
+
+
+def core_uniform(n, m):
+    from .core import uniform_points
+    return uniform_points(n, m)[0]
+
+
+def _nd_mask(F):
+    from .metrics import nondominated
+    return nondominated(F)
+
+
+class LSMOP1(_LSMOP):
+    shape = "linear"; gfun = (_ls_sphere, _ls_sphere)
+
+
+class LSMOP2(_LSMOP):
+    shape = "linear"; gfun = (_ls_griewank, _ls_schwefel)
+
+
+class LSMOP3(_LSMOP):
+    shape = "linear"; gfun = (_ls_rastrigin, _ls_rosenbrock)
+
+
+class LSMOP4(_LSMOP):
+    shape = "linear"; gfun = (_ls_ackley, _ls_griewank)
+
+
+class LSMOP5(_LSMOP):
+    shape = "convex"; gfun = (_ls_sphere, _ls_sphere)
+
+
+class LSMOP6(_LSMOP):
+    shape = "convex"; gfun = (_ls_rosenbrock, _ls_schwefel)
+
+
+class LSMOP7(_LSMOP):
+    shape = "convex"; gfun = (_ls_ackley, _ls_rosenbrock)
+
+
+class LSMOP8(_LSMOP):
+    shape = "convex"; gfun = (_ls_griewank, _ls_sphere)
+
+
+class LSMOP9(_LSMOP):
+    shape = "disconnected"; gfun = (_ls_sphere, _ls_ackley)
+
+
 PROBLEMS = {
     "SparseZDT1": SparseZDT1, "SparseZDT2": SparseZDT2,
     "SMOP1": SMOP1, "SMOP2": SMOP2, "SMOP3": SMOP3, "SMOP4": SMOP4, "SMOP5": SMOP5,
     "SparsePO": SparsePO,
+    "LSMOP1": LSMOP1, "LSMOP2": LSMOP2, "LSMOP3": LSMOP3, "LSMOP4": LSMOP4,
+    "LSMOP5": LSMOP5, "LSMOP6": LSMOP6, "LSMOP7": LSMOP7, "LSMOP8": LSMOP8,
+    "LSMOP9": LSMOP9,
 }

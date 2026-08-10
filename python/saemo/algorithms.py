@@ -232,7 +232,11 @@ def _dst_operator(problem, X, F, RefV, Rate, Step, Sc, Ns, fe, max_fe, rng,
     Nw = len(BestX)
 
     def frac(v):
-        return np.mod(v, 1.0) if amplitude == "mod" else np.abs(v)
+        if amplitude == "mod":
+            return np.mod(v, 1.0)          # sparse: preserves zeros
+        if amplitude == "abs":
+            return np.abs(v)               # sparse, continuous
+        return np.ones_like(v)             # 'fixed': additive radius (LSMOP paper, Eq.12)
 
     perX1, perX2 = [], []
     for i in range(1, Sc + 2):                           # substages 1..Sc+1
