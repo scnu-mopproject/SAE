@@ -10,6 +10,7 @@ import numpy as np
 
 from saemo import problems as prob
 from saemo import algorithms as alg
+from saemo import baselines as bl
 from saemo import experiment as exp
 
 os.makedirs("figures", exist_ok=True)
@@ -20,10 +21,11 @@ POP = 100
 MAX_FE = 20000
 
 ALGOS = {
-    "NSGA-II": alg.nsga2,
     "SparseEA": alg.sparseea,
-    "APF-SparseEA(mod)": lambda p, **k: alg.apf_sparseea(p, amplitude="mod", **k),
-    "APF-SparseEA(abs)": lambda p, **k: alg.apf_sparseea(p, amplitude="abs", **k),
+    "MSKEA": bl.mskea,
+    "MGCEA": bl.mgcea,
+    "BLIGEA": bl.bligea,
+    "APF-SparseEA": lambda p, **k: alg.apf_sparseea(p, amplitude="mod", **k),
 }
 
 SMOPS = {"SMOP1": prob.SMOP1, "SMOP2": prob.SMOP2, "SMOP3": prob.SMOP3,
@@ -40,8 +42,8 @@ def main():
         res = exp.run_comparison(lambda D: pcls(n_var=D), ALGOS, [100],
                                  N=POP, max_fe=MAX_FE, n_runs=N_RUNS, hv_ref=HV_REF)
         per_problem[pname] = res[100]
-        lines.append(f"\n== {pname} (D=100) : IGD mean(std), Wilcoxon vs APF-SparseEA(mod) ==")
-        for row in exp.significance_table(res, metric="igd", reference="APF-SparseEA(mod)"):
+        lines.append(f"\n== {pname} (D=100) : IGD mean(std), Wilcoxon vs APF-SparseEA ==")
+        for row in exp.significance_table(res, metric="igd", reference="APF-SparseEA"):
             lines.append(f"  {row['algo']:20s} {row['mean']:.4e}({row['std']:.1e}) "
                          f"p={row['p']:.1e} {row['vs_ref']}")
 
@@ -52,7 +54,7 @@ def main():
     print("\n=== SMOP1 scalability ===")
     scal = exp.run_comparison(lambda D: prob.SMOP1(n_var=D), ALGOS,
                               [100, 500, 1000], N=POP, max_fe=MAX_FE,
-                              n_runs=N_RUNS, hv_ref=HV_REF)
+                              n_runs=max(4, N_RUNS // 2), hv_ref=HV_REF)
     exp.plot_pareto(scal, 500, "figures/smop1_pareto_D500.png",
                     title="SMOP1 Pareto front (D=500)")
     exp.plot_convergence(scal, 500, "figures/smop1_igd_conv_D500.png", metric="igd",
