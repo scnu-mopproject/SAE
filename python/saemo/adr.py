@@ -127,6 +127,35 @@ def adr_nsga2(problem, N=100, max_fe=20000, seed=0, sigma0=3.0, frac_ref=0.1,
 # E = clip(max(conv_rate, 1 - diversity), 0, 1);  amplitude = sigma0*(a_floor +
 # (1-a_floor)*E). No hand-set Rate/stage boundary and no new tuned constant.
 # --------------------------------------------------------------------------- #
+class StateTracker:
+    """Self-calibrating evolution-state signal: exploration need E in [0,1] from
+    convergence stall (normalized ideal-point movement) and diversity deficit
+    (1 - occupied reference-vector niches). No tuned constants. Shared by the
+    state-adaptive ADR and the state-adaptive APF-SNSGA-II."""
+
+    def __init__(self, N, M, W=5, a_floor=0.1):
+        self.RefV = core.uniform_points(N, M)[0]
+        self.W, self.a_floor = W, a_floor
+        self.ideal_hist, self.early_move = [], None
+
+    def update(self, F):
+        self.ideal_hist.append(F.min(0))
+        rng_obj = F.max(0) - F.min(0) + 1e-12
+        if len(self.ideal_hist) > self.W:
+            move = float(np.mean(np.abs(self.ideal_hist[-1] - self.ideal_hist[-1 - self.W]) / rng_obj))
+            if self.early_move is None and move > 0:
+                self.early_move = move
+            conv = np.clip(move / (self.early_move + 1e-12), 0, 1) if self.early_move else 1.0
+        else:
+            conv = 1.0
+        nd = F[nondominated(F)]
+        div = _niche_occupancy(nd, self.RefV) if len(nd) > 1 else 0.0
+        return float(np.clip(max(conv, 1 - div), 0, 1)), conv, div
+
+    def amp(self, sigma0, E):
+        return sigma0 * (self.a_floor + (1 - self.a_floor) * E)
+
+
 def _niche_occupancy(F, RefV):
     """Fraction of reference-vector niches occupied by the front (in [0,1])."""
     span = np.where(F.max(0) - F.min(0) == 0, 1.0, F.max(0) - F.min(0))
